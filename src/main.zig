@@ -11,7 +11,8 @@ const Job = struct {
     stream: *const net.Stream,
 };
 
-const Jobs = std.atomic.Queue(*Job);
+// We expect slice so we can dealloc
+const Jobs = std.atomic.Queue([]Job);
 var jobs = Jobs.init();
 
 const Worker = struct {
@@ -29,16 +30,15 @@ const Worker = struct {
             var node = jobs.get();
             if (node != null) {
                 var job = node.?.*.data;
-                job.*.handler(
+                job[0].handler(
                     id,
-                    job.*.stream,
+                    job[0].stream,
                 ) catch |err| {
                     std.log.err("Error while handling connection: {}", .{err});
                     // job.*.stream.close();
                 };
 
-                // allocator.free(.{ .ptr = job, .len = 1 });
-                // allocator.free(node.?);
+                allocator.free(job);
             }
         }
     }
@@ -66,8 +66,8 @@ const JobManager = struct {
     }
 
     // Assuming job is allocated on heap
-    pub fn execute(job: *Job) !void {
-        var nodes = try allocator.alloc(std.TailQueue(*Job).Node, 1);
+    pub fn execute(job: []Job) !void {
+        var nodes = try allocator.alloc(std.TailQueue([]Job).Node, 1);
         nodes[0].data = job;
         jobs.put(&nodes[0]);
     }
@@ -100,8 +100,10 @@ fn handleConnection(thread_id: usize, stream: *const net.Stream) !void {
         .{ hello_world.len, hello_world },
     );
 
-    _ = try stream.write(respone);
-    // stream.close();
+    _ = stream.write(respone) catch |err| {
+        std.log.err("Cannot write on stream {}", .{err});
+    };
+    stream.close();
 
     std.log.info("Served {s} on thread {} ", .{ path, thread_id });
 }
@@ -127,9 +129,8 @@ pub fn main() anyerror!void {
         job[0].handler = handleConnection;
         job[0].stream = &conn.stream;
 
-        JobManager.execute(&job[0]) catch |err| {
+        JobManager.execute(job) catch |err| {
             std.log.err("Failed to serve client: {}", .{err});
-            // conn.stream.close();
         };
     } else |err| {
         return err;
